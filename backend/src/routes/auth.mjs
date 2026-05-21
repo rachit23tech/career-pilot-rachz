@@ -11,6 +11,15 @@ import crypto from 'crypto';
 const router = express.Router();
 const stateStore = new Map();
 
+// Periodic sweep of expired stateStore entries every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [state, expiry] of stateStore.entries()) {
+    if (now > expiry) stateStore.delete(state);
+  }
+}, 10 * 60 * 1000).unref();
+
+// Verify token endpoint — loginProtection tracks failed attempts per IP
 router.post('/verify', loginProtection, verifyToken, asyncHandler(async (req, res) => {
   try {
     await saveUserToFirebase(req.user);
@@ -31,7 +40,7 @@ router.get('/profile', verifyToken, asyncHandler(async (req, res) => {
 
 router.get('/notification-preferences', verifyToken, asyncHandler(async (req, res) => {
   const User = (await import('../models/User.model.js')).default;
-  let user = await User.findOne({ email: req.user.email });
+  const user = await User.findOne({ email: req.user.email });
   const preferences = user?.notificationPreferences || {
     jobAlerts: true,
     directMessages: true,
