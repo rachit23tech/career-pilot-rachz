@@ -8,6 +8,9 @@
 
   if (!cursor || !follower) return;
 
+  // Tell CSS that JS loaded — enables cursor: none safely
+  document.documentElement.classList.add('js-cursor-ready');
+
   let mouseX = 0, mouseY = 0;
   let followerX = 0, followerY = 0;
 
