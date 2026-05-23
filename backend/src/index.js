@@ -1,5 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
+import dotenv from "dotenv";
+dotenv.config();
+
 import { createServer } from 'http';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -59,7 +62,7 @@ import {
 const app = express();
 app.use(metricsMiddleware);
 const httpServer = createServer(app);
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 
 // Log FRONTEND_URL for debugging
 console.log('🔧 FRONTEND_URL env var:', process.env.FRONTEND_URL);
@@ -91,7 +94,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-AI-Provider', 'X-AI-Key', 'X-AI-Model']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-AI-Provider', 'X-AI-Key', 'X-AI-Model', 'X-OpenRouter-Key']
 }));
 
 // Helmet security headers - configured to not interfere with CORS
@@ -188,6 +191,7 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Removed broken swagger doc route
 app.get('/metrics', metricsHandler);
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));

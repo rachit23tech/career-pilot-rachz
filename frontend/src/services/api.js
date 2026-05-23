@@ -9,10 +9,17 @@ async function getAuthHeaders() {
 
 
   const token = await user.getIdToken()
-  return {
+  const headers = {
     'Authorization': `Bearer ${token}`,
     'Content-Type': 'application/json'
   }
+
+  const openRouterKey = localStorage.getItem('openRouterApiKey')
+  if (openRouterKey) {
+    headers['X-OpenRouter-Key'] = openRouterKey
+  }
+
+  return headers
 }
 
 // Helper to parse numeric header values
@@ -38,6 +45,27 @@ function parseRetryAfter(value) {
 
 // Helper to handle API responses
 async function handleResponse(response) {
+  let data;
+  const contentType = response.headers.get('content-type');
+  if (contentType && contentType.includes('application/json')) {
+    try {
+      data = await response.json();
+    } catch (e) {
+      data = null;
+    }
+  } else {
+    try {
+      const text = await response.text();
+      data = { error: text || response.statusText };
+    } catch (e) {
+      data = { error: response.statusText };
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error((data && data.error) || `Server error (${response.status})`);
+  }
+  return data || {};
   let data = null
   const contentType = response.headers.get('content-type') || ''
   if (contentType.includes('application/json')) {
@@ -209,6 +237,28 @@ export const resumeApi = {
     return handleResponse(response)
   },
 
+  // Preview GitHub profile before importing
+  async previewGitHub(username) {
+    const headers = await getAuthHeaders()
+    const response = await fetch(`${API_BASE}/resumes/import/github/preview`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ username })
+    })
+    return handleResponse(response)
+  },
+
+  // Import GitHub profile as a resume
+  async importGitHub(username, profile = null) {
+    const headers = await getAuthHeaders()
+    const response = await fetch(`${API_BASE}/resumes/import/github`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ username, profile })
+    })
+    return handleResponse(response)
+  },
+
   // Download resume as PDF
   async downloadPdf(resumeId, version = 'enhanced') {
     const user = auth?.currentUser
@@ -223,11 +273,34 @@ export const resumeApi = {
     })
 
     if (!response.ok) {
-      const errorData = await response.json()
-      throw new Error(errorData.error || 'Failed to download PDF')
+      let errorMsg = 'Failed to download PDF';
+      try {
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          const errorData = await response.json();
+          errorMsg = errorData.error || errorMsg;
+        } else {
+          const errorText = await response.text();
+          errorMsg = errorText || errorMsg;
+        }
+      } catch (e) {
+        // ignore parsing error and keep default
+      }
+      throw new Error(errorMsg);
     }
 
     return response.blob()
+  },
+
+  // Convert raw text to resume
+  async createFromText(text, jobRole) {
+    const headers = await getAuthHeaders()
+    const response = await fetch(`${API_BASE}/resumes/from-text`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ text, jobRole })
+    })
+    return handleResponse(response)
   }
 }
 
@@ -353,6 +426,17 @@ export const enhanceApi = {
       method: 'POST',
       headers,
       body: JSON.stringify(data)
+    })
+    return handleResponse(response)
+  },
+
+  // Score resume and get structured feedback
+  async scoreResume(resumeText) {
+    const headers = await getAuthHeaders()
+    const response = await fetch(`${API_BASE}/enhance/resume-score`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ resumeText })
     })
     return handleResponse(response)
   }

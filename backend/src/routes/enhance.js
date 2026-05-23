@@ -1,5 +1,6 @@
 import express from 'express';
 import { enhanceResume, generateSummary, suggestImprovements, analyzeATSScore, analyzeResumeComprehensive, analyzeBulletPoints, generateBeforeAfter, getVerbLists, getSystemPrompt } from '../config/langchain.js';
+import { computeATSScore } from '../services/atsScorer.js';
 import { generateEmails } from '../services/emailGeneratorService.js';
 import { predictTrajectory } from '../services/ai/careerTrajectory.js';
 import { optimizeLinkedInProfile } from '../services/linkedinOptimizerService.js';
@@ -10,15 +11,117 @@ import { aiRateLimiter } from '../middleware/rateLimiter.js';
 import { createSSEStream } from '../middleware/stream.js';
 import { getDefaultProvider } from '../config/aiProviders.js';
 import { validate } from '../middleware/validate.js';
+import { genAI } from '../config/genAI.js';
 import {
   enhanceResumeSchema,
   resumeTextJobRoleSchema,
   beforeAfterSchema,
   generateEmailSchema,
   optimizeLinkedInSchema,
+  resumeScoreSchema,
 } from '../schemas/enhance.schema.js';
 
 const router = express.Router();
+
+// Score a resume and return structured feedback
+// POST /api/enhance/resume-score
+router.post('/resume-score', verifyToken, aiRateLimiter, validate(resumeScoreSchema), asyncHandler(async (req, res) => {
+  const { resumeText, jobRole } = req.body;
+  const targetRole = jobRole || 'Software Engineer'; // Fallback if not provided
+
+  try {
+    // 1. Get deterministic scores
+    const deterministicScoring = computeATSScore(resumeText, targetRole);
+
+    // 2. Get qualitative feedback via AI
+    const prompt = `Analyze this resume for a ${targetRole} position and return a JSON object with EXACTLY these fields:
+- sections: object with keys "summary", "skills", "experience", "education", "projects" — each containing:
+    - feedback (string, one concise sentence of constructive feedback)
+- topSuggestions: array of exactly 3 strings, each a specific actionable improvement tip
+
+Resume:
+${resumeText}
+
+Return ONLY valid JSON. No markdown fences, no extra text.`;
+
+    const provider = req.aiProvider || getDefaultProvider();
+    const result = await provider.generateContent(prompt);
+    let text = result.text.trim();
+
+    // Strip markdown fences
+    if (text.startsWith('```')) {
+      text = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+    }
+    
+    // Attempt extra extraction
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) text = jsonMatch[0];
+
+    let qualitativeData;
+    try {
+      qualitativeData = JSON.parse(text);
+    } catch (parseErr) {
+      console.error('Resume score JSON parse error:', parseErr, 'Raw text:', text);
+      qualitativeData = {
+        sections: {
+          summary: { feedback: 'Consider making your summary more impactful.' },
+          skills: { feedback: 'Ensure skills match the target job description.' },
+          experience: { feedback: 'Use strong action verbs and metrics.' },
+          education: { feedback: 'Include relevant coursework or GPA if applicable.' },
+          projects: { feedback: 'Detail the technologies used and outcomes.' }
+        },
+        topSuggestions: [
+          'Add more quantifiable metrics to your experience.',
+          'Tailor keywords to the specific job role.',
+          'Ensure formatting is clean and easy to read.'
+        ]
+      };
+    }
+
+    // 3. Map into the format expected by the frontend
+    const scoreData = {
+      overallScore: deterministicScoring.overallScore,
+      sections: {
+        summary: { 
+          score: deterministicScoring.breakdown.formatting, 
+          feedback: qualitativeData.sections?.summary?.feedback || 'Good formatting.' 
+        },
+        skills: { 
+          score: deterministicScoring.breakdown.skills, 
+          feedback: qualitativeData.sections?.skills?.feedback || 'Include more role-specific skills.' 
+        },
+        experience: { 
+          score: deterministicScoring.breakdown.experience, 
+          feedback: qualitativeData.sections?.experience?.feedback || 'Add metrics.' 
+        },
+        education: { 
+          score: 80, // Default good score for education
+          feedback: qualitativeData.sections?.education?.feedback || 'Good.' 
+        },
+        projects: { 
+          score: deterministicScoring.breakdown.keywordMatch, 
+          feedback: qualitativeData.sections?.projects?.feedback || 'Good.' 
+        }
+      },
+      topSuggestions: qualitativeData.topSuggestions || [
+        'Add more quantifiable metrics to your experience.',
+        'Tailor keywords to the specific job role.',
+        'Ensure formatting is clean and easy to read.'
+      ]
+    };
+
+    res.json({
+      success: true,
+      data: scoreData,
+    });
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    console.error('Resume scoring error:', error);
+    throw new ApiError(500, 'Failed to score resume. Please try again.');
+  }
+}));
+
+
 
 // Enhance resume with AI
 router.post('/', verifyToken, extractAIProvider, aiRateLimiter, validate(enhanceResumeSchema), asyncHandler(async (req, res) => {
@@ -358,6 +461,9 @@ router.post('/stream', verifyToken, extractAIProvider, aiRateLimiter, asyncHandl
     stream.endStream();
   }
 }));
+
+
+
 
 // Predict career trajectories based on resume data
 // POST /api/enhance/career-trajectory
