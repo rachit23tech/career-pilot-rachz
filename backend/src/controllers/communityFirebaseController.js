@@ -30,9 +30,11 @@ export const getChannels = async (req, res, next) => {
     }
 
     if (cursor) {
-      const cursorDate = new Date(cursor);
-      if (!Number.isNaN(cursorDate.getTime())) {
-        query = query.startAfter(cursorDate);
+      try {
+        const parsed = JSON.parse(cursor);
+        query = query.startAfter(parsed.isDefault, parsed.createdAt);
+      } catch {
+        // Ignore invalid cursor
       }
     }
 
@@ -47,7 +49,13 @@ export const getChannels = async (req, res, next) => {
     }
 
     const lastDoc = snapshot.docs[snapshot.docs.length - 1];
-    const nextCursor = lastDoc?.data().createdAt?.toDate?.()?.toISOString() || null;
+    const lastData = lastDoc?.data();
+    const nextCursor = lastData
+      ? JSON.stringify({
+          isDefault: lastData.isDefault ?? false,
+          createdAt: lastData.createdAt?.toDate?.() || lastData.createdAt
+        })
+      : null;
 
     res.json({
       success: true,
@@ -230,14 +238,62 @@ export const getChannelMessages = async (req, res, next) => {
 
 export const getPosts = async (req, res, next) => {
   try {
-    const { page = 1, limit = 20, category, sortBy = 'latest' } = req.query;
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
+    const {
+      limit = 20,
+      category,
+      sortBy = 'latest',
+      cursor,
+      channelId,
+      authorId,
+      startDate,
+      endDate
+    } = req.query;
+
+    const maxLimit = Math.min(parseInt(limit) || 20, 100);
+
+    const transformPost = (doc) => {
+      const data = doc.data();
+      const likes = data.likes || [];
+      return {
+        id: doc.id,
+        ...data,
+        likeCount: likes.length,
+        createdAt: data.createdAt?.toDate?.() || data.createdAt
+      };
+    };
+
+    let parsedStartDate = null;
+    let parsedEndDate = null;
+    if (startDate) {
+      parsedStartDate = new Date(startDate);
+      if (isNaN(parsedStartDate.getTime())) parsedStartDate = null;
+    }
+    if (endDate) {
+      parsedEndDate = new Date(endDate);
+      if (!isNaN(parsedEndDate.getTime())) {
+        parsedEndDate.setHours(23, 59, 59, 999);
+      } else {
+        parsedEndDate = null;
+      }
+    }
+
+    const hasDateFilter = parsedStartDate || parsedEndDate;
+    const needsClientDateFilter = hasDateFilter && sortBy !== 'latest';
 
     let query = postsRef.where('isDeleted', '==', false);
 
     if (category && category !== 'all') {
       query = query.where('category', '==', category);
+    }
+    if (channelId) {
+      query = query.where('channelId', '==', channelId);
+    }
+    if (authorId) {
+      query = query.where('author.uid', '==', authorId);
+    }
+    if (!needsClientDateFilter) {
+      if (parsedStartDate) query = query.where('createdAt', '>=', parsedStartDate);
+      if (parsedEndDate) query = query.where('createdAt', '<=', parsedEndDate);
     }
 
     if (sortBy === 'popular') {
@@ -248,29 +304,56 @@ export const getPosts = async (req, res, next) => {
       query = query.orderBy('createdAt', 'desc');
     }
 
-    const startIndex = (pageNum - 1) * limitNum;
-    if (startIndex > 0) query = query.offset(startIndex);
-    query = query.limit(limitNum);
+    let cursorValid = true;
+    if (cursor) {
+      try {
+        const cursorDoc = await postsRef.doc(cursor).get();
+        if (!cursorDoc.exists) {
+          cursorValid = false;
+        } else {
+          const postData = cursorDoc.data();
+          if (sortBy === 'popular') {
+            query = query.startAfter(postData.likeCount, postData.createdAt);
+          } else if (sortBy === 'trending') {
+            query = query.startAfter(postData.views, postData.likeCount);
+          } else {
+            query = query.startAfter(postData.createdAt);
+          }
+        }
+      } catch {
+        cursorValid = false;
+      }
+    }
 
-    const snapshot = await query.get();
+    const effectiveLimit = maxLimit * (needsClientDateFilter ? 3 : hasDateFilter ? 2 : 1);
+    const snapshot = await query.limit(effectiveLimit).get();
+    let posts = snapshot.docs.map(transformPost).filter(p => !p.status || p.status === 'published');
 
-    const posts = snapshot.docs
-      .map(doc => {
-        const data = doc.data();
-        const likes = data.likes || [];
-        return {
-          id: doc.id,
-          ...data,
-          likeCount: likes.length,
-          createdAt: data.createdAt?.toDate?.() || data.createdAt
-        };
-      })
-      .filter(post => !post.status || post.status === 'published');
+    if (needsClientDateFilter) {
+      const startTime = parsedStartDate?.getTime();
+      const endTime = parsedEndDate?.getTime();
+      posts = posts.filter(p => {
+        const created = p.createdAt instanceof Date
+          ? p.createdAt.getTime()
+          : new Date(p.createdAt || 0).getTime();
+        if (startTime && created < startTime) return false;
+        if (endTime && created > endTime) return false;
+        return true;
+      });
+      posts = posts.slice(0, maxLimit);
+    } else if (hasDateFilter) {
+      posts = posts.slice(0, maxLimit);
+    }
 
     res.json({
       success: true,
       posts,
-      pagination: { page: pageNum, limit: limitNum, hasMore: snapshot.size === limitNum }
+      pagination: {
+        limit: maxLimit,
+        nextCursor: posts.length ? posts[posts.length - 1].id : null,
+        hasMore: posts.length === maxLimit,
+        invalidCursor: !cursorValid
+      }
     });
   } catch (error) {
     next(error);
